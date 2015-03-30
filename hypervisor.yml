@@ -1,0 +1,94 @@
+#  Copyright 2015 Yanis Guenane <yguenane@gmail.com>
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+---
+- hosts: '{{ host }}'
+  remote_user: '{{ remote_user }}'
+  tasks:
+    - name: Install needed packages
+      yum: name={{ item }}
+           state=present
+      sudo: true
+      with_items:
+        - genisoimage
+        - libvirt-python
+
+    - name: Store the public ssh key
+      shell: cat ~/.ssh/id_rsa.pub
+      register: pub_key
+
+    - name: Create the proper tmp directory
+      file: path={{ item.tmp_dir }}/{{ item.name }}
+            state=directory
+      with_items: nodes
+
+    - name: Generate the proper libvirt domain
+      template: src=./templates/domain.xml.tmpl
+                dest={{ item.tmp_dir }}/{{ item.name }}/{{ item.name }}.xml
+      with_items: nodes
+
+    - name: Generate the cloud-init meta-data file
+      template: src=./templates/metadata.tmpl
+                dest={{ item.tmp_dir }}/{{ item.name }}/meta-data
+      with_items: nodes
+
+    - name: Copy the cloud-init user-data file
+      template: src=./templates/user-data.tmpl
+                dest={{ item.tmp_dir }}/{{ item.name }}/user-data
+      with_items: nodes
+
+    # Checks.
+    #
+    - name: Check if qcow2 already exists
+      shell: "stat '{{ item.dest_qcow2 }}'"
+      register: dest_qcow2_present
+      ignore_errors: True
+      with_items: nodes
+
+    - name: Check if iso already exists
+      shell: "stat '{{ item.dest_iso }}'"
+      register: dest_iso_present
+      ignore_errors: True
+      with_items: nodes
+
+    - name: Check if domain already exists
+      shell: "stat /etc/libvirt/qemu/'{{ item.name }}'.xml"
+      register: domain_present
+      sudo: True
+      ignore_errors: True
+      with_items: nodes
+
+
+    - name: Create qcow2
+      shell: "qemu-img create -f qcow2 -b '{{ item.base_qcow2 }}' '{{ item.dest_qcow2 }}' '{{ item.size_qcow2 }}'"
+      sudo: True
+      when: dest_qcow2_present|failed
+      with_items: nodes
+
+    - name: Create iso
+      shell: "genisoimage -output '{{ item.dest_iso }}' -volid cidata -joliet -rock '{{ item.tmp_dir }}/{{ item.name }}/user-data' '{{ item.tmp_dir }}/{{ item.name }}/meta-data'"
+      sudo: True
+      when: dest_iso_present|failed
+      with_items: nodes
+
+    - name: Configure the different domains
+      command: virsh define {{ item.tmp_dir }}/{{ item.name }}/{{ item.name }}.xml
+      sudo: True
+      when: domain_present|failed
+      with_items: nodes
+    
+    - name: Load the Virtual Machine
+      virt: name={{ item.name }}
+            state={{ item.stat | default('running') }}
+            uri=qemu:///system
+      with_items: nodes
